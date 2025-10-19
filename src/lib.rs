@@ -5,3 +5,4 @@ pub mod telemetry;
 pub mod shutdown;
 pub mod error;
 pub mod response;
+pub mod store;

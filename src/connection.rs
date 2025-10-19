@@ -1,5 +1,6 @@
 use crate::error::Error;
 use crate::response::Response;
+use crate::store::Database;
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::spawn;
@@ -8,12 +9,15 @@ use tracing::info;
 enum Command {
     Ping,
     Echo(String),
+    Set(String, String),
+    Get(String),
     Unknown,
 }
 
 pub async fn handle_connection(
     socket: tokio::net::TcpStream,
     addr: std::net::SocketAddr,
+    db: std::sync::Arc<Database>,
 ) -> Result<(), Error> {
     info!("Handling connection from {}", addr);
 
@@ -33,9 +37,9 @@ pub async fn handle_connection(
             };
             if n != 0 {
                 info!("Read {} bytes from {}", n, addr);
-                let msg = String::from_utf8_lossy(&buf[..]).trim().to_string();
+                let msg = String::from_utf8_lossy(&buf[..n]).trim().to_string();
 
-                let response = response(&msg);
+                let response = response(&msg, db.clone()).await;
 
                 writer
                     .write(&response.to_bytes())
@@ -58,7 +62,7 @@ pub async fn handle_connection(
     Ok(())
 }
 
-fn response(msg: &str) -> Response {
+async fn response(msg: &str, db: std::sync::Arc<Database>) -> Response {
     let args = msg.split_whitespace().collect::<Vec<&str>>();
 
     let cmd = match args.get(0) {
@@ -66,6 +70,20 @@ fn response(msg: &str) -> Response {
         Some(&"ECHO") => {
             let echo_msg = args[1..].join(" ");
             Command::Echo(echo_msg)
+        }
+        Some(&"SET") => {
+            if args.len() >= 3 {
+                Command::Set(args[1].to_string(), args[2..].join(" ").to_string())
+            } else {
+                Command::Unknown
+            }
+        }
+        Some(&"GET") => {
+            if args.len() == 2 {
+                Command::Get(args[1].to_string())
+            } else {
+                Command::Unknown
+            }
         }
         _ => {
             info!("Unknown command: {}", msg);
@@ -76,6 +94,21 @@ fn response(msg: &str) -> Response {
     match cmd {
         Command::Ping => Response::Simple("PONG".into()),
         Command::Echo(msg) => Response::Bulk(Some(msg)),
+        Command::Set(key, value) => {
+            let mut data = db.data.write().await;
+            let result = match data.insert(key, value) {
+                Some(_) => "Updated",
+                None => "OK",
+            };
+            Response::Simple(format!("{}", result))
+        }
+        Command::Get(key) => {
+            let data = db.data.read().await;
+            match data.get(&key) {
+                Some(value) => Response::Bulk(Some(value.clone())),
+                None => Response::Bulk(None),
+            }
+        }
         Command::Unknown => Error::UnknownCommand(msg.to_string()).to_response(),
     }
 }

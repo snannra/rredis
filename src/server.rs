@@ -1,4 +1,5 @@
 use crate::connection::handle_connection;
+use crate::store::Database;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -8,11 +9,17 @@ use tracing::{error, info, warn};
 pub struct Server {
     addr: String,
     max_conns: usize,
+    db: Arc<Database>,
 }
 
 impl Server {
     pub fn new(addr: String, max_conns: usize) -> Self {
-        Self { addr, max_conns }
+        let db = Database::new();
+        Self {
+            addr,
+            max_conns,
+            db: Arc::new(db),
+        }
     }
 
     pub async fn run(
@@ -30,9 +37,10 @@ impl Server {
                     match res {
                         Ok((socket, peer_addr)) => {
                             let permit = limiter.clone().acquire_owned().await.unwrap();
+                            let db = Arc::clone(&self.db);
                             tokio::spawn(async move {
                                 let _permit = permit;
-                                if let Err(e) = handle_connection(socket, peer_addr).await {
+                                if let Err(e) = handle_connection(socket, peer_addr, db).await {
                                     warn!("Error handling connection from {}: {}", peer_addr, e);
                                 }
                             });
