@@ -14,11 +14,11 @@ pub struct Server {
 
 impl Server {
     pub fn new(addr: String, max_conns: usize) -> Self {
-        let db = Database::new();
+        let db = Arc::new(Database::new());
         Self {
             addr,
             max_conns,
-            db: Arc::new(db),
+            db: db,
         }
     }
 
