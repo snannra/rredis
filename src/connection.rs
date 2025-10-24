@@ -1,7 +1,8 @@
 use crate::error::Error;
 use crate::response::Response;
-use crate::store::Database;
+use crate::store::{Database, Entry, KvStore};
 use anyhow::Result;
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::spawn;
 use tracing::info;
@@ -9,15 +10,20 @@ use tracing::info;
 enum Command {
     Ping,
     Echo(String),
-    Set(String, String),
     Get(String),
+    Set(String, String),
+    Del(Vec<String>),
+    Exists(Vec<String>),
+    ExpireAt(String, Instant),
+    Persist(String),
+    TtlMs(String),
     Unknown,
 }
 
 pub async fn handle_connection(
     socket: tokio::net::TcpStream,
     addr: std::net::SocketAddr,
-    db: std::sync::Arc<Database>,
+    db: Database,
 ) -> Result<(), Error> {
     info!("Handling connection from {}", addr);
 
@@ -62,7 +68,7 @@ pub async fn handle_connection(
     Ok(())
 }
 
-async fn response(msg: &str, db: std::sync::Arc<Database>) -> Response {
+async fn response(msg: &str, db: Database) -> Response {
     let args = msg.split_whitespace().collect::<Vec<&str>>();
 
     let cmd = match args.get(0) {
@@ -71,16 +77,68 @@ async fn response(msg: &str, db: std::sync::Arc<Database>) -> Response {
             let echo_msg = args[1..].join(" ");
             Command::Echo(echo_msg)
         }
+        Some(&"GET") => {
+            if args.len() == 2 {
+                Command::Get(args[1].to_string())
+            } else {
+                Command::Unknown
+            }
+        }
         Some(&"SET") => {
+            let mut index_of_opts = args.len();
+            for i in 1..args.len() {
+                if args[i].to_uppercase() == "NX"
+                    || args[i].to_uppercase() == "XX"
+                    || args[i].to_uppercase() == "DEFAULT"
+                {
+                    index_of_opts = i;
+                    break;
+                }
+            }
             if args.len() >= 3 {
                 Command::Set(args[1].to_string(), args[2..].join(" ").to_string())
             } else {
                 Command::Unknown
             }
         }
-        Some(&"GET") => {
+        Some(&"DEL") => {
+            if args.len() >= 2 {
+                let keys = args[1..].iter().map(|s| s.to_string()).collect();
+                Command::Del(keys)
+            } else {
+                Command::Unknown
+            }
+        }
+        Some(&"EXISTS") => {
+            if args.len() >= 2 {
+                let keys = args[1..].iter().map(|s| s.to_string()).collect();
+                Command::Exists(keys)
+            } else {
+                Command::Unknown
+            }
+        }
+        Some(&"EXPIREAT") => {
+            if args.len() == 3 {
+                if let Ok(timestamp) = args[2].parse::<u64>() {
+                    let when = Instant::now() + std::time::Duration::from_secs(timestamp);
+                    Command::ExpireAt(args[1].to_string(), when)
+                } else {
+                    Command::Unknown
+                }
+            } else {
+                Command::Unknown
+            }
+        }
+        Some(&"PERSIST") => {
             if args.len() == 2 {
-                Command::Get(args[1].to_string())
+                Command::Persist(args[1].to_string())
+            } else {
+                Command::Unknown
+            }
+        }
+        Some(&"TTLMS") => {
+            if args.len() == 2 {
+                Command::TtlMs(args[1].to_string())
             } else {
                 Command::Unknown
             }
@@ -94,21 +152,33 @@ async fn response(msg: &str, db: std::sync::Arc<Database>) -> Response {
     match cmd {
         Command::Ping => Response::Simple("PONG".into()),
         Command::Echo(msg) => Response::Bulk(Some(msg)),
+        Command::Get(key) => {
+            let response = db.get(&key).await;
+            match response {
+                Some(value) => Response::Bulk(Some(String::from_utf8_lossy(&value).to_string())),
+                None => Response::Bulk(None),
+            }
+        }
         Command::Set(key, value) => {
+            let response = db
+                .set(&key, value.into_bytes().into(), Default::default())
+                .await;
             let mut data = db.data.write().await;
-            let result = match data.insert(key, value) {
+            let entry = Entry::new(value.into_bytes());
+            let result = match data.insert(key, entry) {
                 Some(_) => "Updated",
                 None => "OK",
             };
             Response::Simple(format!("{}", result))
         }
-        Command::Get(key) => {
-            let data = db.data.read().await;
-            match data.get(&key) {
-                Some(value) => Response::Bulk(Some(value.clone())),
-                None => Response::Bulk(None),
-            }
-        }
         Command::Unknown => Error::UnknownCommand(msg.to_string()).to_response(),
     }
 }
+
+// async fn get(&self, key: &str) -> Option<Value>;
+//     async fn set(&self, key: &str, val: Value, opts: SetOptions) -> bool;
+//     async fn del(&self, keys: &[String]) -> usize;
+//     async fn exists(&self, keys: &[String]) -> usize;
+//     async fn expire_at(&self, key: &str, when: Instant) -> bool;
+//     async fn persist(&self, key: &str) -> bool;
+//     async fn ttl_ms(&self, key: &str) -> Option<i64>;

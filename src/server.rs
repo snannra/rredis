@@ -9,16 +9,16 @@ use tracing::{error, info, warn};
 pub struct Server {
     addr: String,
     max_conns: usize,
-    db: Arc<Database>,
+    db: Database,
 }
 
 impl Server {
     pub fn new(addr: String, max_conns: usize) -> Self {
-        let db = Arc::new(Database::new());
+        let db = Database::new();
         Self {
             addr,
             max_conns,
-            db: db,
+            db,
         }
     }
 
@@ -37,7 +37,7 @@ impl Server {
                     match res {
                         Ok((socket, peer_addr)) => {
                             let permit = limiter.clone().acquire_owned().await.unwrap();
-                            let db = Arc::clone(&self.db);
+                            let db = self.db.clone();
                             tokio::spawn(async move {
                                 let _permit = permit;
                                 if let Err(e) = handle_connection(socket, peer_addr, db).await {
